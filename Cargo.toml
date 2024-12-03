@@ -10,5 +10,6 @@ rand = "0.8.5"
 rand_distr = "0.4.3"
 rayon = "1.10.0"
 ndarray = { version = "0.16.1", features = ["blas"] }
+tch = "0.18.0"
 # blas-src = { version = "0.10", features = ["openblas"] }
 # openblas-src = { version = "0.10", features = ["cblas", "system"] }

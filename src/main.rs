@@ -141,13 +141,13 @@ impl DenseForBackprop {
 
         let z: Vec<f64> = self
             .weights
-            .iter()
-            .map(|row| row.iter().zip(inputs).map(|(w, i)| w * i).sum::<f64>())
+            .par_iter()
+            .map(|row| row.par_iter().zip(inputs).map(|(w, i)| w * i).sum::<f64>())
             .zip(&self.biases)
             .map(|(z, b)| z + b)
             .collect();
 
-        z.iter()
+        z.par_iter()
             .map(|&z| {
                 // println!("z is: {:?}, activ: {:?}", z, activation(z));
                 activation(z)
@@ -162,18 +162,18 @@ impl DenseForBackprop {
                             // activation_prime: fn(f64) -> f64, // Activation function derivative
     ) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
         let d_weights: Vec<Vec<f64>> = delta_next
-            .iter()
-            .map(|&delta| inputs.iter().map(|&input| delta * input).collect())
+            .par_iter()
+            .map(|&delta| inputs.par_iter().map(|&input| delta * input).collect())
             .collect();
 
         let d_biases: Vec<f64> = delta_next.to_vec();
 
         let delta: Vec<f64> = self
             .weights
-            .iter()
+            .par_iter()
             .map(|weights| {
                 weights
-                    .iter()
+                    .par_iter()
                     .zip(delta_next)
                     .map(|(w, d_next)| w * d_next)
                     .sum()
@@ -222,14 +222,17 @@ impl NeuralNetwork {
         activation_prime: fn(f64) -> f64, // Derivative of activation function
         optimizer: &mut AdamOptimizer,    // Optimizer for updating weights
     ) -> f64 {
+        let time1 = Instant::now();
         let mut activations = vec![];
         let mut zs = vec![];
         let mut current_input: Vec<f64> = inputs.iter().map(|&x| f64::from(x)).collect();
+        let time2 = Instant::now();
+        let dur1 = time1.elapsed();
 
         for layer in &self.dense_layers {
             let z: Vec<f64> = layer
                 .weights
-                .iter()
+                .par_iter()
                 .map(|row| {
                     row.iter()
                         .zip(&current_input)
@@ -247,6 +250,9 @@ impl NeuralNetwork {
             current_input = a;
         }
 
+        let time3 = Instant::now();
+        let dur2 = time2.elapsed();
+
         let logits = current_input.clone();
         let loss = sparse_categorical_crossentropy(&logits, label);
 
@@ -255,6 +261,9 @@ impl NeuralNetwork {
             .enumerate()
             .map(|(i, &y_hat)| if i == label { y_hat - 1.0 } else { y_hat })
             .collect();
+
+        let time4 = Instant::now();
+        let dur3 = time3.elapsed();
 
         for (i, layer) in self.dense_layers.iter_mut().enumerate().rev() {
             let (d_weights, d_biases, delta) = layer.backward(&activations[i], &delta_next);
@@ -267,6 +276,13 @@ impl NeuralNetwork {
             optimizer.update_vec(&mut layer.biases, &d_biases);
         }
 
+        let dur4 = time4.elapsed();
+
+        // println!(
+        //         "Backward pass - times: [convert input: {:?}, matmul/activ: {:?}, calc_delta: {:?}, update_optimizer: {:?}]",
+        //         dur1, dur2, dur3, dur4
+        //     );
+
         loss
     }
 
@@ -276,21 +292,32 @@ impl NeuralNetwork {
         optimizer: &mut AdamOptimizer,
     ) -> f64 {
         let mut total_loss = 0.0;
+        // let time1 = Instant::now();
         // let info_len = info_in.len();
 
-        for (inputs, label) in info_in.clone() {
-            let time1 = Instant::now();
-            let flattened_input = self.flatten.forward(inputs);
-            let time2 = Instant::now();
-            let dur1 = time1.elapsed();
-            let logits = self.forward(flattened_input.clone(), leaky_relu);
-            let time3 = Instant::now();
-            let dur2 = time2.elapsed();
-            let loss = sparse_categorical_crossentropy(&logits, label as usize);
-            let time4 = Instant::now();
-            let dur3 = time3.elapsed();
-            self.backward(flattened_input, label as usize, leaky_relu_prime, optimizer);
-            let dur4 = time4.elapsed();
+        let input_loss_label: Vec<(Vec<f32>, f64, f32)> = info_in
+            .par_iter()
+            .map(|(input, label)| {
+                let flattened_input = self.flatten.forward(input.clone());
+                let logits = self.forward(flattened_input.clone(), leaky_relu);
+                let loss = sparse_categorical_crossentropy(&logits, *label as usize);
+                (flattened_input, loss, *label)
+            })
+            .collect();
+
+        for (inputs, loss, label) in input_loss_label {
+            // let time1 = Instant::now();
+            // let flattened_input = self.flatten.forward(inputs);
+            // let time2 = Instant::now();
+            // let dur1 = time1.elapsed();
+            // let logits = self.forward(flattened_input.clone(), leaky_relu);
+            // let time3 = Instant::now();
+            // let dur2 = time2.elapsed();
+            // let loss = sparse_categorical_crossentropy(&logits, label as usize);
+            // let time4 = Instant::now();
+            // let dur3 = time3.elapsed();
+            self.backward(inputs, label as usize, leaky_relu_prime, optimizer);
+            // let dur4 = time4.elapsed();
 
             // println!(
             //     "Debug times: [flatten: {:?}, forward: {:?}, loss: {:?}, backward: {:?}]",
@@ -347,7 +374,8 @@ fn sigma_function(x: f64) -> f64 {
 
 fn sigma_function_prime(x: f64) -> f64 {
     let epownegx = f64::powf(E, 0_f64 - x);
-    let res = epownegx / (1_f64 - epownegx);
+    let epow2 = 1_f64 + epownegx;
+    let res = epownegx / (epow2 * epow2);
     if res.is_nan() {
         0_f64
     } else {
@@ -482,9 +510,9 @@ fn main() {
         dense_layers: vec![seq_2, seq_3],
     };
 
-    let mut optimizer = AdamOptimizer::new(model.total_params(), 0.001);
+    let mut optimizer = AdamOptimizer::new(model.total_params(), 0.002);
 
-    let batch_size = 32;
+    let batch_size = 128;
     let training_vec = train_data
         .outer_iter()
         .map(|x| ndarray_process(x.to_owned()))
@@ -507,20 +535,23 @@ fn main() {
 
     let max_iter_count = final_training_data.clone().into_iter().count();
 
-    for (i, input) in final_training_data.into_iter().enumerate() {
-        // println!("input size {:?}", input.iter().count());
-        let now = Instant::now();
-        let loss = model.train_step(input, &mut optimizer);
-        let elapsed = now.elapsed();
-        if i % 50 == 0 {
-            println!(
-                "Step: {:?}/{:?}. Loss: {:?}. Time: {:?}, Total: {:?}",
-                i,
-                max_iter_count,
-                loss,
-                elapsed,
-                elapsed * 50
-            );
+    for ii in 1..5 {
+        for (i, input) in final_training_data.clone().into_iter().enumerate() {
+            // println!("input size {:?}", input.iter().count());
+            let now = Instant::now();
+            let loss = model.train_step(input, &mut optimizer);
+            let elapsed = now.elapsed();
+            if i % 50 == 0 {
+                println!(
+                    "Epoch: {:?}. Step: {:?}/{:?}. Loss: {:?}. Time: {:?}, Total: {:?}",
+                    ii,
+                    i,
+                    max_iter_count,
+                    loss,
+                    elapsed,
+                    elapsed * 50
+                );
+            }
         }
     }
 }
