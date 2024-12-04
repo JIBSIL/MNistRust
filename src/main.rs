@@ -518,7 +518,7 @@ fn main() {
         dense_layers: vec![seq_2, seq_3],
     };
 
-    let mut optimizer = AdamOptimizer::new(model.total_params(), 0.002);
+    let mut optimizer = AdamOptimizer::new(model.total_params(), 0.001);
 
     let batch_size = 64;
     let training_vec = train_data
@@ -543,7 +543,7 @@ fn main() {
 
     let max_iter_count = final_training_data.clone().into_iter().count();
 
-    for ii in 1..5 {
+    for ii in 1..6 {
         for (i, input) in final_training_data.clone().into_iter().enumerate() {
             // println!("input size {:?}", input.iter().count());
             let now = Instant::now();
