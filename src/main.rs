@@ -1,9 +1,14 @@
+use bincode::*;
 use mnist::*;
 use ndarray::prelude::*;
 use rand::*;
 use rand_distr::*;
 use rayon::prelude::*;
-use std::time::Instant;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::{fs::File, time::Instant};
 
 const E: f64 = 2.718281828459045235;
 
@@ -83,6 +88,7 @@ struct Dense {
     neurons: Vec<Neuron>,
 }
 
+#[derive(Deserialize, Serialize)]
 struct DenseForBackprop {
     weights: Vec<Vec<f64>>,
     biases: Vec<f64>,
@@ -184,6 +190,7 @@ impl DenseForBackprop {
     }
 }
 
+#[derive(Deserialize, Serialize)]
 struct Flatten;
 
 impl Flatten {
@@ -194,6 +201,7 @@ impl Flatten {
 
 // full net is just a bunch of layers
 // todo:
+#[derive(Deserialize, Serialize)]
 struct NeuralNetwork {
     flatten: Flatten,
     dense_layers: Vec<DenseForBackprop>,
@@ -554,4 +562,16 @@ fn main() {
             }
         }
     }
+
+    println!("Training successful; saving to weights.bin");
+
+    if Path::new("weights.bin").exists() {
+        println!("Removing old weights.bin...");
+        fs::remove_file("weights.bin").unwrap();
+    }
+
+    let serialized_model = bincode::serialize(&model).unwrap();
+    let mut outfile = File::create("weights.bin").unwrap();
+    outfile.write(serialized_model.as_slice()).unwrap();
+    println!("Wrote out weights.bin!")
 }
