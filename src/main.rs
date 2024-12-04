@@ -512,7 +512,7 @@ fn main() {
 
     let mut optimizer = AdamOptimizer::new(model.total_params(), 0.002);
 
-    let batch_size = 128;
+    let batch_size = 64;
     let training_vec = train_data
         .outer_iter()
         .map(|x| ndarray_process(x.to_owned()))
