@@ -1,4 +1,5 @@
 use bincode::*;
+use itertools::izip;
 use mnist::*;
 use ndarray::prelude::*;
 use rand::*;
@@ -92,6 +93,11 @@ struct Dense {
 struct DenseForBackprop {
     weights: Vec<Vec<f64>>,
     biases: Vec<f64>,
+    m_weights: Vec<Vec<f64>>,
+    v_weights: Vec<Vec<f64>>,
+    m_biases: Vec<f64>,
+    v_biases: Vec<f64>,
+    t: usize,
 }
 
 impl Dense {
@@ -122,29 +128,24 @@ impl DenseForBackprop {
 
         let biases: Vec<f64> = (0..num_neurons).map(|_| 0.01).collect();
 
-        DenseForBackprop { weights, biases }
+        // Initialize m and v for Adam optimizer
+        let m_weights = vec![vec![0.0; num_inputs]; num_neurons];
+        let v_weights = vec![vec![0.0; num_inputs]; num_neurons];
+        let m_biases = vec![0.0; num_neurons];
+        let v_biases = vec![0.0; num_neurons];
+
+        DenseForBackprop {
+            weights,
+            biases,
+            m_weights,
+            v_weights,
+            m_biases,
+            v_biases,
+            t: 0,
+        }
     }
 
     fn forward(&self, inputs: &[f64], activation: fn(f64) -> f64) -> Vec<f64> {
-        // let ndarr1 = ndarray::Array2::from(self.weights);
-        // let ndweights = vec_to_ndarray(self.weights);
-        // let ndinput = ndarray::ArrayView1::from(inputs);
-        // let z = ndweights.dot(ndinput);
-
-        // println!(
-        //     "rows: {:?}, cols: {:?}",
-        //     self.weights.len(),
-        //     self.weights.get(0).unwrap().len()
-        // );
-        // let ndweights = Array2::from_shape_vec(
-        //     (self.weights.len(), self.weights.get(0).unwrap().len()),
-        //     self.weights.clone().into_iter().flatten().collect(),
-        // )
-        // .expect("Invalid shape for ndweights");
-
-        // let ndinput = ArrayView1::from(&inputs);
-        // let z = ndweights.dot(&ndinput);
-
         let z: Vec<f64> = self
             .weights
             .par_iter()
@@ -153,19 +154,13 @@ impl DenseForBackprop {
             .map(|(z, b)| z + b)
             .collect();
 
-        z.par_iter()
-            .map(|&z| {
-                // println!("z is: {:?}, activ: {:?}", z, activation(z));
-                activation(z)
-            })
-            .collect()
+        z.par_iter().map(|&z| activation(z)).collect()
     }
 
     fn backward(
-        &self,
+        &mut self,
         inputs: &[f64],
         delta_next: &[f64], // Error signal from the next layer
-                            // activation_prime: fn(f64) -> f64, // Activation function derivative
     ) -> (Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
         let d_weights: Vec<Vec<f64>> = delta_next
             .par_iter()
@@ -228,14 +223,11 @@ impl NeuralNetwork {
         inputs: Vec<f32>,                 // Original input to the network
         label: usize,                     // True label
         activation_prime: fn(f64) -> f64, // Derivative of activation function
-        optimizer: &mut AdamOptimizer,    // Optimizer for updating weights
+        optimizer: &AdamOptimizer,        // Optimizer for updating weights
     ) -> f64 {
-        let time1 = Instant::now();
         let mut activations = vec![];
         let mut zs = vec![];
         let mut current_input: Vec<f64> = inputs.iter().map(|&x| f64::from(x)).collect();
-        let time2 = Instant::now();
-        let dur1 = time1.elapsed();
 
         for layer in &self.dense_layers {
             let z: Vec<f64> = layer
@@ -251,15 +243,12 @@ impl NeuralNetwork {
                 .map(|(z, b)| z + b)
                 .collect();
 
-            let a: Vec<f64> = z.iter().map(|&z| activation_prime(z)).collect();
+            let a: Vec<f64> = z.iter().map(|&z| leaky_relu(z)).collect();
 
             zs.push(z);
             activations.push(current_input.clone());
             current_input = a;
         }
-
-        let time3 = Instant::now();
-        let dur2 = time2.elapsed();
 
         let logits = current_input.clone();
         let loss = sparse_categorical_crossentropy(&logits, label);
@@ -270,26 +259,26 @@ impl NeuralNetwork {
             .map(|(i, &y_hat)| if i == label { y_hat - 1.0 } else { y_hat })
             .collect();
 
-        let time4 = Instant::now();
-        let dur3 = time3.elapsed();
-
         for (i, layer) in self.dense_layers.iter_mut().enumerate().rev() {
+            layer.t += 1; // Increment time step for Adam optimizer
             let (d_weights, d_biases, delta) = layer.backward(&activations[i], &delta_next);
-            // println!("Weights: {:?}", &d_weights);
-            // println!("Biases: {:?}", &d_biases);
-
+            // Update weights and biases using Adam optimizer
+            optimizer.update_vec_vec(
+                &mut layer.weights,
+                &d_weights,
+                &mut layer.m_weights,
+                &mut layer.v_weights,
+                layer.t,
+            );
+            optimizer.update_vec(
+                &mut layer.biases,
+                &d_biases,
+                &mut layer.m_biases,
+                &mut layer.v_biases,
+                layer.t,
+            );
             delta_next = delta; // Pass error signal to the previous layer
-
-            optimizer.update_vec_vec(&mut layer.weights, &d_weights);
-            optimizer.update_vec(&mut layer.biases, &d_biases);
         }
-
-        let dur4 = time4.elapsed();
-
-        // println!(
-        //         "Backward pass - times: [convert input: {:?}, matmul/activ: {:?}, calc_delta: {:?}, update_optimizer: {:?}]",
-        //         dur1, dur2, dur3, dur4
-        //     );
 
         loss
     }
@@ -297,11 +286,9 @@ impl NeuralNetwork {
     fn train_step(
         self: &mut NeuralNetwork,
         info_in: Vec<(Vec<Vec<f32>>, f32)>,
-        optimizer: &mut AdamOptimizer,
+        optimizer: &AdamOptimizer,
     ) -> f64 {
         let mut total_loss = 0.0;
-        // let time1 = Instant::now();
-        // let info_len = info_in.len();
 
         let input_loss_label: Vec<(Vec<f32>, f64, f32)> = info_in
             .par_iter()
@@ -314,24 +301,7 @@ impl NeuralNetwork {
             .collect();
 
         for (inputs, loss, label) in input_loss_label {
-            // let time1 = Instant::now();
-            // let flattened_input = self.flatten.forward(inputs);
-            // let time2 = Instant::now();
-            // let dur1 = time1.elapsed();
-            // let logits = self.forward(flattened_input.clone(), leaky_relu);
-            // let time3 = Instant::now();
-            // let dur2 = time2.elapsed();
-            // let loss = sparse_categorical_crossentropy(&logits, label as usize);
-            // let time4 = Instant::now();
-            // let dur3 = time3.elapsed();
             self.backward(inputs, label as usize, leaky_relu_prime, optimizer);
-            // let dur4 = time4.elapsed();
-
-            // println!(
-            //     "Debug times: [flatten: {:?}, forward: {:?}, loss: {:?}, backward: {:?}]",
-            //     dur1, dur2, dur3, dur4
-            // );
-
             total_loss += loss;
         }
 
@@ -419,72 +389,70 @@ fn sparse_categorical_accuracy(logits: &[f64], true_label: usize) -> f64 {
     }
 }
 
-// not a library
-// juts copied from a library
+// adamgpt
 struct AdamOptimizer {
     learning_rate: f64,
     beta1: f64,
     beta2: f64,
     epsilon: f64,
-    m: Vec<f64>, // First moment estimates
-    v: Vec<f64>, // Second moment estimates
-    t: usize,    // Time step
 }
 
 impl AdamOptimizer {
-    fn new(num_params: usize, learning_rate: f64) -> Self {
+    fn new(learning_rate: f64) -> Self {
         AdamOptimizer {
             learning_rate,
             beta1: 0.9,
             beta2: 0.999,
             epsilon: 1e-7,
-            m: vec![0.0; num_params],
-            v: vec![0.0; num_params],
-            t: 0,
         }
     }
 
-    fn update_vec_vec(&mut self, params: &mut Vec<Vec<f64>>, grads: &Vec<Vec<f64>>) {
-        for (param_row, grad_row) in params.iter_mut().zip(grads.iter()) {
-            for (param, grad) in param_row.iter_mut().zip(grad_row.iter()) {
-                *param -= self.learning_rate * grad;
+    fn update_vec_vec(
+        &self,
+        params: &mut Vec<Vec<f64>>,
+        grads: &Vec<Vec<f64>>,
+        m: &mut Vec<Vec<f64>>,
+        v: &mut Vec<Vec<f64>>,
+        t: usize,
+    ) {
+        for (param_row, grad_row, m_row, v_row) in
+            izip!(params.iter_mut(), grads.iter(), m.iter_mut(), v.iter_mut())
+        {
+            for (param, grad, m_elem, v_elem) in izip!(
+                param_row.iter_mut(),
+                grad_row.iter(),
+                m_row.iter_mut(),
+                v_row.iter_mut()
+            ) {
+                *m_elem = self.beta1 * *m_elem + (1.0 - self.beta1) * *grad;
+                *v_elem = self.beta2 * *v_elem + (1.0 - self.beta2) * grad.powi(2);
+
+                let m_hat = *m_elem / (1.0 - self.beta1.powi(t as i32));
+                let v_hat = *v_elem / (1.0 - self.beta2.powi(t as i32));
+
+                *param -= self.learning_rate * m_hat / (v_hat.sqrt() + self.epsilon);
             }
         }
     }
 
-    // fn update_vec_vec(&mut self, params: &mut Vec<Vec<f64>>, grads: &Vec<Vec<f64>>) {
-    //     self.t += 1;
+    fn update_vec(
+        &self,
+        params: &mut Vec<f64>,
+        grads: &Vec<f64>,
+        m: &mut Vec<f64>,
+        v: &mut Vec<f64>,
+        t: usize,
+    ) {
+        for (param, grad, m_elem, v_elem) in
+            izip!(params.iter_mut(), grads.iter(), m.iter_mut(), v.iter_mut())
+        {
+            *m_elem = self.beta1 * *m_elem + (1.0 - self.beta1) * *grad;
+            *v_elem = self.beta2 * *v_elem + (1.0 - self.beta2) * grad.powi(2);
 
-    //     for (param_row, grad_row) in params.iter_mut().zip(grads.iter()) {
-    //         for (i, (param, grad)) in param_row.iter_mut().zip(grad_row.iter()).enumerate() {
-    //             self.m[i] = self.beta1 * self.m[i] + (1.0 - self.beta1) * grad;
-    //             self.v[i] = self.beta2 * self.v[i] + (1.0 - self.beta2) * grad.powi(2);
+            let m_hat = *m_elem / (1.0 - self.beta1.powi(t as i32));
+            let v_hat = *v_elem / (1.0 - self.beta2.powi(t as i32));
 
-    //             let m_hat = self.m[i] / (1.0 - self.beta1.powi(self.t as i32));
-    //             let v_hat = self.v[i] / (1.0 - self.beta2.powi(self.t as i32));
-
-    //             *param -= self.learning_rate * m_hat / (v_hat.sqrt() + self.epsilon);
-    //         }
-    //     }
-    // }
-
-    // fn update_vec(&mut self, params: &mut Vec<f64>, grads: &Vec<f64>) {
-    //     self.t += 1;
-
-    //     for (i, (param, grad)) in params.iter_mut().zip(grads.iter()).enumerate() {
-    //         self.m[i] = self.beta1 * self.m[i] + (1.0 - self.beta1) * grad;
-    //         self.v[i] = self.beta2 * self.v[i] + (1.0 - self.beta2) * grad.powi(2);
-
-    //         let m_hat = self.m[i] / (1.0 - self.beta1.powi(self.t as i32));
-    //         let v_hat = self.v[i] / (1.0 - self.beta2.powi(self.t as i32));
-
-    //         *param -= self.learning_rate * m_hat / (v_hat.sqrt() + self.epsilon);
-    //     }
-    // }
-
-    fn update_vec(&mut self, params: &mut Vec<f64>, grads: &Vec<f64>) {
-        for (param, grad) in params.iter_mut().zip(grads.iter()) {
-            *param -= self.learning_rate * grad;
+            *param -= self.learning_rate * m_hat / (v_hat.sqrt() + self.epsilon);
         }
     }
 }
@@ -518,7 +486,7 @@ fn main() {
         dense_layers: vec![seq_2, seq_3],
     };
 
-    let mut optimizer = AdamOptimizer::new(model.total_params(), 0.001);
+    let optimizer = AdamOptimizer::new(0.001);
 
     let batch_size = 64;
     let training_vec = train_data
@@ -547,7 +515,7 @@ fn main() {
         for (i, input) in final_training_data.clone().into_iter().enumerate() {
             // println!("input size {:?}", input.iter().count());
             let now = Instant::now();
-            let loss = model.train_step(input, &mut optimizer);
+            let loss = model.train_step(input, &optimizer);
             let elapsed = now.elapsed();
             if i % 50 == 0 {
                 println!(
